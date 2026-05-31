@@ -12,4 +12,3 @@ workspace = true
 
 [dependencies]
 mapviz-core.workspace = true
-earcutr.workspace = true
