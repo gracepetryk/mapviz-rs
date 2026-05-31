@@ -19,5 +19,13 @@ mapviz-render.workspace = true
 mapviz-tiles.workspace = true
 mapviz-layers.workspace = true
 mapviz-data.workspace = true
-# TODO: wasm-bindgen, web-sys, js-sys, wasm-bindgen-futures, console_error_panic_hook,
-# tracing-wasm — the JS interop surface (added when the JS API is implemented).
+glam.workspace = true
+
+# The JS interop surface is web-only; keeping it cfg-gated lets the crate still
+# compile to an (empty) native lib for CI.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = ["HtmlCanvasElement"] }
+console_error_panic_hook.workspace = true

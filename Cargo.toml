@@ -21,8 +21,16 @@ mapviz-layers = { path = "crates/mapviz-layers" }
 mapviz-data = { path = "crates/mapviz-data" }
 
 # Shared external dependencies (versions centralized here; pulled in per-crate as needed).
-# Heavier deps (wgpu, wasm-bindgen, geo, geozero, prost, image, rstar, lyon, ...)
-# are added to their owning crate when that crate is implemented — see CLAUDE.md.
+# Heavier deps (geo, geozero, prost, image, rstar, lyon, ...) are added to their
+# owning crate when that crate is implemented — see CLAUDE.md.
 glam = "0.33"
 thiserror = "2"
-bytemuck = "1"
+bytemuck = { version = "1", features = ["derive"] }
+wgpu = "29"
+
+# Web / wasm
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+console_error_panic_hook = "0.1"

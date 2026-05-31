@@ -1,0 +1,47 @@
+//! Backend-agnostic drawable primitives.
+//!
+//! Primitives are plain data: a layer produces them, a backend consumes them.
+//! They carry no GPU types — the `repr(C)` layout is a convenience for backends
+//! that upload them directly, not a coupling to any backend.
+//!
+//! A [`Primitive`] is a *batch* of like instances rather than a single shape, so
+//! a backend can render each variant as one instanced draw call while preserving
+//! the order in which layers submitted them. New primitive kinds are new
+//! variants, not new fields scattered across the frame.
+
+/// An axis-aligned, solid-colored quad in world space.
+///
+/// `center` and `half_extent` are in world units; `color` is linear RGBA in
+/// `[0, 1]`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QuadInstance {
+    /// Center of the quad, in world units.
+    pub center: [f32; 2],
+    /// Half-width and half-height, in world units.
+    pub half_extent: [f32; 2],
+    /// Linear RGBA color, each channel in `[0, 1]`.
+    pub color: [f32; 4],
+}
+
+impl QuadInstance {
+    /// A square centered at `center` with the given `half_size` and color.
+    pub fn square(center: [f32; 2], half_size: f32, color: [f32; 4]) -> Self {
+        Self {
+            center,
+            half_extent: [half_size, half_size],
+            color,
+        }
+    }
+}
+
+/// A batch of like primitive instances, drawable as a single instanced pass.
+///
+/// Each variant carries a contiguous run of instances. Backends match on the
+/// variant and draw the batch; the order of batches within a [`Frame`] is the
+/// order layers submitted them, which is the render (painter's) order.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Primitive {
+    /// A batch of solid-colored quads.
+    Quads(Vec<QuadInstance>),
+}

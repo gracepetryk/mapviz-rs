@@ -1,1 +1,9 @@
 /target
+
+# Generated wasm package (built with wasm-pack)
+/crates/*/pkg
+
+# Node / Vite (examples)
+node_modules
+dist
+*.tsbuildinfo

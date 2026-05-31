@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>mapviz — grid example</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0d0d12;
+      }
+      #map {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        touch-action: none; /* let us handle pan/zoom gestures */
+        cursor: grab;
+      }
+      #map:active {
+        cursor: grabbing;
+      }
+      #error {
+        position: fixed;
+        inset: 0;
+        display: none;
+        place-content: center;
+        padding: 2rem;
+        color: #ff9c9c;
+        font: 14px/1.5 ui-monospace, monospace;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="map"></canvas>
+    <div id="error"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

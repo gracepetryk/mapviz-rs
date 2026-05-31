@@ -12,5 +12,12 @@ workspace = true
 
 [dependencies]
 mapviz-core.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+thiserror.workspace = true
 bytemuck.workspace = true
-# TODO: wgpu — the WebGPU backend (added when the renderer is implemented).
+
+
+# Surface creation from an HtmlCanvasElement is web-only.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { workspace = true, features = ["HtmlCanvasElement"] }
