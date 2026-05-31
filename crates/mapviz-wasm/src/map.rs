@@ -1,8 +1,8 @@
 //! The `Map` class exposed to JavaScript.
 
 use glam::Vec2;
-use mapviz_core::{Camera2d, LineInstance, Scene};
-use mapviz_layers::{LineLayer, QuadLayer};
+use mapviz_core::{Camera2d, LineInstance, Polyline, Scene};
+use mapviz_layers::{LineLayer, PolylineLayer, QuadLayer};
 use mapviz_render::Renderer;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
@@ -60,6 +60,23 @@ impl Map {
             line_w,
             [0.25, 0.8, 1.0, 0.9],
         )));
+        // A multi-vertex polyline zigzag across the top of the grid, exercising
+        // the PolylineLayer / MVT LINESTRING path.
+        let zz_y = border * 0.7;
+        let zz_step = border * 0.4;
+        let zz_amp = border * 0.25;
+        scene.add_layer(Box::new(PolylineLayer::new(vec![Polyline::new(
+            vec![
+                [-border, zz_y],
+                [-border + zz_step, zz_y + zz_amp],
+                [-border + zz_step * 2.0, zz_y],
+                [-border + zz_step * 3.0, zz_y + zz_amp],
+                [-border + zz_step * 4.0, zz_y],
+                [border, zz_y],
+            ],
+            line_w * 1.5,
+            [1.0, 0.8, 0.1, 0.9],
+        )])));
 
         let mut camera = Camera2d::new(Vec2::new(width as f32, height as f32));
         // Fit the bordered grid comfortably within the smaller viewport dimension.

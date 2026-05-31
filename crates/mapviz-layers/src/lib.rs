@@ -5,7 +5,7 @@
 //! rendering backend directly. Users add their own layers by implementing the
 //! same trait.
 
-use mapviz_core::{Frame, Layer, LineInstance, Primitive, QuadInstance};
+use mapviz_core::{Frame, Layer, LineInstance, Polyline, Primitive, QuadInstance};
 
 /// A layer of solid-colored quads.
 ///
@@ -98,6 +98,48 @@ impl Layer for LineLayer {
     }
 }
 
+/// A layer of multi-vertex polylines (thick stroked paths).
+///
+/// Each [`Polyline`] is expanded into [`LineInstance`] segments at
+/// [`prepare`](Layer::prepare) time via [`Polyline::expand`]. The resulting
+/// segments are emitted as a single `Primitive::Lines` batch — one batch per
+/// `prepare` call regardless of how many polylines the layer holds.
+///
+/// This maps directly to the MVT (Mapbox Vector Tile spec 2.1) `LINESTRING`
+/// geometry type: each MVT linestring becomes one [`Polyline`].
+pub struct PolylineLayer {
+    polylines: Vec<Polyline>,
+}
+
+impl PolylineLayer {
+    /// A layer from a list of polylines.
+    pub fn new(polylines: Vec<Polyline>) -> Self {
+        Self { polylines }
+    }
+
+    /// A layer containing a single polyline built from the given `points`,
+    /// `width`, and `color`.
+    pub fn from_points(points: Vec<[f32; 2]>, width: f32, color: [f32; 4]) -> Self {
+        Self::new(vec![Polyline::new(points, width, color)])
+    }
+
+    /// The polylines held by this layer.
+    pub fn polylines(&self) -> &[Polyline] {
+        &self.polylines
+    }
+}
+
+impl Layer for PolylineLayer {
+    fn prepare(&mut self, frame: &mut Frame) {
+        let segments: Vec<LineInstance> = self
+            .polylines
+            .iter()
+            .flat_map(|pl| pl.expand())
+            .collect();
+        frame.push(Primitive::Lines(segments));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +185,52 @@ mod tests {
         match &frame.primitives[0] {
             Primitive::Lines(lines) => assert_eq!(lines.len(), 4),
             other => panic!("expected a line batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn polyline_layer_n_points_produces_n_minus_1_segments() {
+        // 5-point path → 4 segments.
+        let points = vec![
+            [0.0f32, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [2.0, 1.0],
+            [2.0, 0.0],
+        ];
+        let mut layer = PolylineLayer::from_points(points, 0.1, [1.0, 0.0, 0.0, 1.0]);
+        let mut frame = Frame::new();
+        layer.prepare(&mut frame);
+        assert_eq!(frame.primitives.len(), 1);
+        match &frame.primitives[0] {
+            Primitive::Lines(lines) => assert_eq!(lines.len(), 4),
+            other => panic!("expected a line batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn polyline_layer_multiple_polylines_in_one_batch() {
+        // Two 3-point polylines → 2 + 2 = 4 segments in one batch.
+        let pl1 = Polyline::new(vec![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], 0.1, [1.0; 4]);
+        let pl2 = Polyline::new(vec![[0.0, 1.0], [1.0, 1.0], [2.0, 1.0]], 0.1, [1.0; 4]);
+        let mut layer = PolylineLayer::new(vec![pl1, pl2]);
+        let mut frame = Frame::new();
+        layer.prepare(&mut frame);
+        assert_eq!(frame.primitives.len(), 1, "all polylines in one batch");
+        match &frame.primitives[0] {
+            Primitive::Lines(lines) => assert_eq!(lines.len(), 4),
+            other => panic!("expected a line batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn polyline_layer_degenerate_fewer_than_2_points_emits_empty_batch() {
+        let mut layer = PolylineLayer::from_points(vec![[0.0, 0.0]], 0.1, [1.0; 4]);
+        let mut frame = Frame::new();
+        layer.prepare(&mut frame);
+        match &frame.primitives[0] {
+            Primitive::Lines(lines) => assert!(lines.is_empty()),
+            other => panic!("expected an empty line batch, got {other:?}"),
         }
     }
 }
