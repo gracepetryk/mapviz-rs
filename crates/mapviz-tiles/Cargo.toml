@@ -1,0 +1,15 @@
+[package]
+name = "mapviz-tiles"
+description = "Tile sources for mapviz: XYZ raster and MVT vector tiles, caching, and LOD."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mapviz-core.workspace = true
+# TODO: geozero, prost, image — tile decode (added when tile sources are implemented).

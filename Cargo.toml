@@ -1,7 +1,28 @@
-[package]
-name = "mapviz"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/gracepetryk/mapviz-rs"
+authors = ["Grace Petryk <me@gracepetryk.com>"]
 
-[dependencies]
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.dependencies]
+# Internal crates
+mapviz-core = { path = "crates/mapviz-core" }
+mapviz-render = { path = "crates/mapviz-render" }
+mapviz-tiles = { path = "crates/mapviz-tiles" }
+mapviz-layers = { path = "crates/mapviz-layers" }
+mapviz-data = { path = "crates/mapviz-data" }
+
+# Shared external dependencies (versions centralized here; pulled in per-crate as needed).
+# Heavier deps (wgpu, wasm-bindgen, geo, geozero, prost, image, rstar, lyon, ...)
+# are added to their owning crate when that crate is implemented — see CLAUDE.md.
+glam = "0.33"
+thiserror = "2"
+bytemuck = "1"

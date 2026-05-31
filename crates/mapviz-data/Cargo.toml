@@ -1,0 +1,16 @@
+[package]
+name = "mapviz-data"
+description = "Streaming data sources for mapviz, with built-in spatial (R*-tree) and temporal indices."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mapviz-core.workspace = true
+# TODO: rstar, futures, time, serde — spatial index, stream combinators,
+# timestamps, and (de)serialization (added when data sources are implemented).

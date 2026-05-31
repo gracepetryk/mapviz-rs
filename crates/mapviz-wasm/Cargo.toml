@@ -1,0 +1,23 @@
+[package]
+name = "mapviz-wasm"
+description = "The wasm-bindgen JS/TS API for mapviz — the only crate that targets wasm32."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mapviz-core.workspace = true
+mapviz-render.workspace = true
+mapviz-tiles.workspace = true
+mapviz-layers.workspace = true
+mapviz-data.workspace = true
+# TODO: wasm-bindgen, web-sys, js-sys, wasm-bindgen-futures, console_error_panic_hook,
+# tracing-wasm — the JS interop surface (added when the JS API is implemented).

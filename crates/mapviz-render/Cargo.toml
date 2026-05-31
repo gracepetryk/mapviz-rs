@@ -1,0 +1,16 @@
+[package]
+name = "mapviz-render"
+description = "The wgpu rendering backend for mapviz and the reference Backend implementation (full 2D + 3D)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mapviz-core.workspace = true
+bytemuck.workspace = true
+# TODO: wgpu — the WebGPU backend (added when the renderer is implemented).

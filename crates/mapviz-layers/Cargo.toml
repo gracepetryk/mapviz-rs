@@ -1,0 +1,16 @@
+[package]
+name = "mapviz-layers"
+description = "Built-in layer implementations for mapviz (points, lines, polygons, billboards, trajectories, heatmaps, ...)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mapviz-core.workspace = true
+# TODO: earcutr, lyon — polygon triangulation and 2D path tessellation
+# (added when the built-in vector layers are implemented).

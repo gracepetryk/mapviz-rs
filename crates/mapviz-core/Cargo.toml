@@ -1,0 +1,15 @@
+[package]
+name = "mapviz-core"
+description = "Renderer-agnostic core for mapviz: geometry, projections, scene, camera, and time. No GPU, no wasm."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+glam.workspace = true
+thiserror.workspace = true

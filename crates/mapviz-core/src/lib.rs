@@ -1,0 +1,24 @@
+//! Renderer-agnostic core for mapviz.
+//!
+//! This crate owns the parts of mapviz that have nothing to do with any
+//! particular rendering backend: coordinate systems, projections, the scene
+//! graph, cameras, and the scene clock. It must not depend on `wgpu` or any
+//! other backend's types — see `CLAUDE.md` for the rationale.
+//!
+//! The rendering contract lives here too, as the `Backend` trait (with a 2D
+//! surface every backend must implement and an optional 3D capability surface),
+//! but the implementations live in backend crates such as `mapviz-render`.
+
+pub mod coords;
+pub mod error;
+
+pub use error::{Error, Result};
+
+// Planned modules, added as each area is implemented (see CLAUDE.md):
+//   pub mod projection;  // Web Mercator, equirectangular, 3D globe; pluggable trait
+//   pub mod camera;      // 2D + 3D camera state (data) and controllers (separate)
+//   pub mod scene;       // ordered stack of layers, dirty tracking
+//   pub mod layer;       // `Layer` trait: prepare(ctx) + render(pass)
+//   pub mod backend;     // `Backend` trait + `Capabilities` query (2D mandatory, 3D opt-in)
+//   pub mod time;        // scene `Clock`, play/pause/scrub
+//   pub mod trajectory;  // `Trajectory<T>`: timestamped samples + interpolator
