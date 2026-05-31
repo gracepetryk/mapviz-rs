@@ -35,6 +35,36 @@ impl QuadInstance {
     }
 }
 
+/// A solid-colored straight line segment in world space.
+///
+/// `start`/`end` are endpoints in world units; `width` is the stroke width, also
+/// in world units (so it scales with zoom, like a [`QuadInstance`]); `color` is
+/// linear RGBA in `[0, 1]`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineInstance {
+    /// Start endpoint, in world units.
+    pub start: [f32; 2],
+    /// End endpoint, in world units.
+    pub end: [f32; 2],
+    /// Stroke width, in world units.
+    pub width: f32,
+    /// Linear RGBA color, each channel in `[0, 1]`.
+    pub color: [f32; 4],
+}
+
+impl LineInstance {
+    /// A segment from `start` to `end` with the given width and color.
+    pub fn new(start: [f32; 2], end: [f32; 2], width: f32, color: [f32; 4]) -> Self {
+        Self {
+            start,
+            end,
+            width,
+            color,
+        }
+    }
+}
+
 /// A batch of like primitive instances, drawable as a single instanced pass.
 ///
 /// Each variant carries a contiguous run of instances. Backends match on the
@@ -44,4 +74,6 @@ impl QuadInstance {
 pub enum Primitive {
     /// A batch of solid-colored quads.
     Quads(Vec<QuadInstance>),
+    /// A batch of solid-colored line segments.
+    Lines(Vec<LineInstance>),
 }

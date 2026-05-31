@@ -5,7 +5,7 @@
 //! rendering backend directly. Users add their own layers by implementing the
 //! same trait.
 
-use mapviz_core::{Frame, Layer, Primitive, QuadInstance};
+use mapviz_core::{Frame, Layer, LineInstance, Primitive, QuadInstance};
 
 /// A layer of solid-colored quads.
 ///
@@ -61,6 +61,43 @@ impl Layer for QuadLayer {
     }
 }
 
+/// A layer of solid-colored line segments.
+///
+/// Like [`QuadLayer`], the lines are fixed at construction and copied into the
+/// frame each time the layer is prepared.
+pub struct LineLayer {
+    lines: Vec<LineInstance>,
+}
+
+impl LineLayer {
+    /// A layer from an explicit set of line segments.
+    pub fn new(lines: Vec<LineInstance>) -> Self {
+        Self { lines }
+    }
+
+    /// An axis-aligned rectangle outline (4 segments) from `min` to `max`.
+    pub fn rect(min: [f32; 2], max: [f32; 2], width: f32, color: [f32; 4]) -> Self {
+        let [x0, y0] = min;
+        let [x1, y1] = max;
+        let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        let lines = (0..4)
+            .map(|i| LineInstance::new(corners[i], corners[(i + 1) % 4], width, color))
+            .collect();
+        Self::new(lines)
+    }
+
+    /// The lines this layer will emit.
+    pub fn lines(&self) -> &[LineInstance] {
+        &self.lines
+    }
+}
+
+impl Layer for LineLayer {
+    fn prepare(&mut self, frame: &mut Frame) {
+        frame.push(Primitive::Lines(self.lines.clone()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,13 +117,32 @@ mod tests {
     }
 
     #[test]
-    fn prepare_pushes_one_quad_batch() {
+    fn quad_layer_prepare_pushes_one_quad_batch() {
         let mut layer = QuadLayer::grid(2, 2, 1.0, 0.5);
         let mut frame = Frame::new();
         layer.prepare(&mut frame);
         assert_eq!(frame.primitives.len(), 1);
         match &frame.primitives[0] {
             Primitive::Quads(quads) => assert_eq!(quads.len(), 4),
+            other => panic!("expected a quad batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rect_has_four_segments() {
+        let layer = LineLayer::rect([-1.0, -1.0], [1.0, 1.0], 0.1, [1.0; 4]);
+        assert_eq!(layer.lines().len(), 4);
+    }
+
+    #[test]
+    fn line_layer_prepare_pushes_one_line_batch() {
+        let mut layer = LineLayer::rect([0.0, 0.0], [1.0, 1.0], 0.1, [1.0; 4]);
+        let mut frame = Frame::new();
+        layer.prepare(&mut frame);
+        assert_eq!(frame.primitives.len(), 1);
+        match &frame.primitives[0] {
+            Primitive::Lines(lines) => assert_eq!(lines.len(), 4),
+            other => panic!("expected a line batch, got {other:?}"),
         }
     }
 }

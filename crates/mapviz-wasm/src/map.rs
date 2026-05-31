@@ -1,8 +1,8 @@
 //! The `Map` class exposed to JavaScript.
 
 use glam::Vec2;
-use mapviz_core::{Camera2d, Scene};
-use mapviz_layers::QuadLayer;
+use mapviz_core::{Camera2d, LineInstance, Scene};
+use mapviz_layers::{LineLayer, QuadLayer};
 use mapviz_render::Renderer;
 use wasm_bindgen::prelude::*;
 use web_sys::HtmlCanvasElement;
@@ -35,18 +35,36 @@ impl Map {
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
 
-        // A placeholder grid until real data sources land.
+        // A placeholder scene until real data sources land: a colored grid with
+        // axes and a border drawn on top (later layers render over earlier ones,
+        // which also exercises cross-primitive draw order).
         let cols = 20;
         let rows = 20;
         let spacing = 2.0;
         let square = 1.5;
+        let grid_extent = (cols.max(rows) - 1) as f32 * spacing + square;
+        let border = grid_extent * 0.5 + spacing;
+        let line_w = spacing * 0.15;
+
         let mut scene = Scene::new();
         scene.add_layer(Box::new(QuadLayer::grid(cols, rows, spacing, square)));
+        // Axes through the origin.
+        scene.add_layer(Box::new(LineLayer::new(vec![
+            LineInstance::new([-border, 0.0], [border, 0.0], line_w, [1.0, 1.0, 1.0, 0.85]),
+            LineInstance::new([0.0, -border], [0.0, border], line_w, [1.0, 1.0, 1.0, 0.85]),
+        ])));
+        // Border around the grid.
+        scene.add_layer(Box::new(LineLayer::rect(
+            [-border, -border],
+            [border, border],
+            line_w,
+            [0.25, 0.8, 1.0, 0.9],
+        )));
 
         let mut camera = Camera2d::new(Vec2::new(width as f32, height as f32));
-        // Fit the grid comfortably within the smaller viewport dimension.
-        let grid_extent = (cols.max(rows) - 1) as f32 * spacing + square;
-        camera.set_scale(width.min(height) as f32 / (grid_extent * 1.1));
+        // Fit the bordered grid comfortably within the smaller viewport dimension.
+        let view_extent = border * 2.0;
+        camera.set_scale(width.min(height) as f32 / (view_extent * 1.1));
 
         Ok(Map {
             renderer,
