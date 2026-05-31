@@ -6,9 +6,9 @@ The library is **generic**: it provides primitives (coordinate systems, cameras,
 
 ## Guiding principles
 
-- **Renderer-agnostic core, pluggable backends.** Geometry, projections, scene graph, and animation logic must not depend on `wgpu` or any backend's types. The renderer is defined by a `Backend` trait; alternate backends (WebGL2, software/SVG, headless test) must be possible without touching the core.
-- **Tiered backend capabilities.** Backends MUST implement the full 2D primitive set (points, lines, polygons, raster tiles, billboards, labels). 3D primitives (extruded geometry, true 3D meshes, depth-tested trajectories, globe projection) are an opt-in capability surface — non-wgpu backends may implement any subset or none. The `Backend` trait exposes a capability query; layers and applications decide how to degrade. We do **not** restrict the wgpu backend's feature use for the sake of weaker backends — the wgpu path uses compute shaders, storage buffers, and whatever else makes the visualization good.
-- **The wgpu backend is the reference and is guaranteed to implement the entire `Backend` interface, 2D and 3D.** It is the baseline every feature is designed and tested against; any new primitive lands in wgpu first. Other backends are best-effort subsets.
+- **Data-oriented scene description.** Layers describe *what* to draw as plain, backend-agnostic data (a `Frame` of `Primitive` batches); the renderer decides *how and when* to draw it. Geometry, projections, scene graph, and animation logic live in the core and must not depend on `wgpu` or any GPU types — that dependency stops at the `Frame`/`Primitive` boundary. This boundary is the decoupling that matters: it makes the scene logic (projections, interpolation, tessellation, LOD, label placement) unit-testable with no GPU, lets the renderer change its GPU strategy without touching layers, gives whole-frame visibility for global optimization (batching, culling), and fits the "produce the scene at time *t*" model. We keep it for those day-one benefits, not to swap backends.
+- **wgpu is the renderer and our portability layer.** `mapviz-render` is tightly coupled to `wgpu` by design; we use its full feature set (compute shaders, storage buffers, whatever makes the visualization good) without rationing for weaker targets. wgpu already abstracts the GPU API underneath (WebGPU, and a WebGL2 fallback on the web), so it *is* our second-backend insurance for the only realistic case — browsers without WebGPU. We do not build our own `Backend` trait or capability-tiering system for that.
+- **A custom backend trait is deferred until a non-wgpu target is real.** The only thing wgpu can't give us is a *non-GPU* consumer (SVG export, deterministic headless snapshot rendering). If one of those becomes a concrete need, we add a trait then, designed against that real case — and the `Frame`/`Primitive` boundary already gives us the seam to plug it in cheaply. Until then, the public API talks to the concrete wgpu renderer.
 - **Streaming-first data model.** Real-time feeds (ADS-B, GPS, sensor streams) are first-class. Static datasets are just a degenerate streaming case.
 - **Time is a dimension.** Every entity and layer can be timestamped; the renderer interpolates and the camera can scrub. This avoids bolt-on animation systems later.
 - **Composable layers.** A scene is an ordered stack of layers (raster tiles, vector tiles, points, lines, polygons, billboards, meshes, heatmaps, custom). Users register custom layers via a small trait.
@@ -37,18 +37,18 @@ mapviz/
 - **Coordinate systems:** WGS84 (lon/lat/alt), ECEF (earth-centered earth-fixed, for 3D globe math), local ENU tangent planes, normalized device coords. Conversions are explicit and typed — no raw `[f64; 3]` shuffling.
 - **Projections:** Web Mercator (2D default), equirectangular, and a true 3D globe projection. Projections are a trait so users can add their own (UTM zones, polar stereographic, etc.).
 - **Camera:** 2D (pan/zoom/rotate) and 3D (orbit, free-fly, locked-to-target). Camera state is plain data; controllers are separate and swappable.
-- **Layers:** trait `Layer { fn prepare(&mut self, ctx); fn render(&self, pass); }`. Built-ins live in `mapviz-layers`; users implement the trait for custom rendering.
+- **Layers:** trait `Layer { fn prepare(&mut self, frame: &mut Frame); }`. A layer emits backend-agnostic `Primitive` batches into the `Frame` — it never issues GPU calls or touches a render pass, which is what keeps `wgpu` out of the scene logic. Built-ins live in `mapviz-layers`; users implement the same trait for custom layers. (Power users who need their own shader/pass will get an explicit escape-hatch primitive later; the data model covers the built-in primitive vocabulary.)
 - **Data sources:** trait that produces typed features over time. Adapters for static GeoJSON, WebSocket streams, server-sent events, and arbitrary user-driven push. Spatial index (R*-tree) and temporal index built in.
 - **Picking:** GPU id-buffer pass plus CPU spatial-index fallback. Returns the feature, not a pixel.
 - **Labels & icons:** SDF text rendering with collision-resolved placement; billboards with screen-space sizing.
 
 ### Rendering
 
-- `Backend` trait in `mapviz-core` defines the rendering contract. It splits into a mandatory 2D surface (the full primitive set above) and optional 3D capabilities behind a `Capabilities` query. Layers ask the backend what it supports and either render, substitute (e.g. flatten a 3D trajectory to 2D), or skip — the application chooses the policy.
-- `mapviz-render` is the wgpu backend and the reference implementation. It implements every capability and is the target every feature is built against first.
-- One render graph per frame: layers declare passes and resources; the backend schedules them. Avoids ad-hoc `if let Some(...)` per-layer wiring.
-- Shaders in WGSL, owned by the wgpu backend. Other backends own their own shading. Share camera/uniform bind groups across layers within a backend.
-- Use instancing for points/billboards/aircraft-style entities.
+- The contract between scene and renderer is **data, not a trait**: a `Frame` of ordered `Primitive` batches (`mapviz-core`), which `mapviz-render` consumes. Layers fill the `Frame`; the renderer owns everything about turning it into pixels. There is no `Backend` trait today — `mapviz-render` is concretely wgpu, and the public API talks to it directly (see Guiding principles for when that would change).
+- `Primitive` is a *batch* enum (e.g. `Quads(Vec<QuadInstance>)`), not one-shape-per-entry: each variant is a contiguous run drawable as a single instanced pass, and the order of batches in the `Frame` is the render (painter's) order. New primitive kinds are new variants, not new fields. `mapviz-render` mirrors each with a GPU-layout type (`GpuPrimitive`/`GpuQuad`, `bytemuck::Pod`) via `From`, so the `bytemuck` casts stay in the render crate and core has no GPU types.
+- 3D is the same `Frame`/`Primitive` flow with a 3D camera matrix plus a depth attachment; no separate capability negotiation, since wgpu does everything.
+- Shaders in WGSL, owned by `mapviz-render`, included with `include_str!`. Share the camera/uniform bind group across pipelines.
+- Use instancing for points/billboards/aircraft-style entities. Filled polygons / meshes use indexed draws instead — the renderer keeps a small holder per *draw model* (instanced vs indexed), not per primitive type.
 - LOD is per-layer, not global — tile layers care about zoom, point layers care about screen density.
 
 ### Time and interpolation
@@ -132,7 +132,7 @@ Anything the example needs that doesn't have a natural place in the generic API 
 - A full GIS engine (no analysis, routing, geocoding).
 - A styling DSL like Mapbox GL Style Spec — layers are configured in code.
 - Server-side rendering.
-- A bundled WebGL2 backend in v0. The architecture supports one (and a community contribution would be welcome), but the project ships wgpu-only initially. Browser-support implications are documented for consumers.
+- A hand-written WebGL2 backend. If browser reach ever demands a fallback for engines without WebGPU, we use wgpu's own WebGL2 path (accepting its limits — no compute/storage buffers), not a separate backend of our own. The project targets WebGPU first; browser-support implications are documented for consumers.
 
 ## Build & dev workflow
 
