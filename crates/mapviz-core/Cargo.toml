@@ -13,3 +13,4 @@ workspace = true
 [dependencies]
 glam.workspace = true
 thiserror.workspace = true
+earcutr.workspace = true

@@ -1,7 +1,7 @@
 //! Concrete wgpu renderer for the 2D primitive set.
 
 use bytemuck::{Pod, Zeroable};
-use mapviz_core::{Camera2d, Frame, LineInstance, Primitive, QuadInstance};
+use mapviz_core::{Camera2d, FillVertex, Frame, LineInstance, Primitive, QuadInstance};
 use wgpu::util::DeviceExt;
 
 /// Errors raised while setting up or driving the renderer.
@@ -65,6 +65,23 @@ impl From<&LineInstance> for GpuLine {
             end: l.end,
             width: l.width,
             color: l.color,
+        }
+    }
+}
+
+/// GPU layout for a fill vertex. Mirrors [`FillVertex`].
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuFillVertex {
+    position: [f32; 2],
+    color: [f32; 4],
+}
+
+impl From<&FillVertex> for GpuFillVertex {
+    fn from(v: &FillVertex) -> Self {
+        Self {
+            position: v.position,
+            color: v.color,
         }
     }
 }
@@ -261,11 +278,196 @@ impl<T: GpuInstance> InstancedBatch<T> {
     }
 }
 
+/// Holder for an indexed triangle-mesh draw — separate from [`InstancedBatch`]
+/// because the draw model is different (vertex buffer + index buffer, no
+/// instancing). Accumulates all `Mesh` batches for a frame (`begin`/`push`),
+/// concatenates them into a single vertex and index buffer pair (`upload`), and
+/// draws each over its sub-range of that buffer.
+struct IndexedBatch {
+    pipeline: wgpu::RenderPipeline,
+    vertex_buf: wgpu::Buffer,
+    index_buf: wgpu::Buffer,
+    /// Buffer capacity in vertices.
+    vertex_capacity: u32,
+    /// Buffer capacity in indices.
+    index_capacity: u32,
+    /// Vertices accumulated this frame.
+    vertices: Vec<GpuFillVertex>,
+    /// Indices accumulated this frame.
+    indices: Vec<u32>,
+}
+
+impl IndexedBatch {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        camera_bgl: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mesh"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("mesh.wgsl").into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mesh"),
+            bind_group_layouts: &[Some(camera_bgl)],
+            immediate_size: 0,
+        });
+        const ATTRS: [wgpu::VertexAttribute; 2] =
+            wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
+        let pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mesh"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<GpuFillVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &ATTRS,
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        // One-element placeholder buffers that grow on demand.
+        let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mesh vertices"),
+            size: std::mem::size_of::<GpuFillVertex>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let index_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mesh indices"),
+            size: std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            vertex_buf,
+            index_buf,
+            vertex_capacity: 0,
+            index_capacity: 0,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
+
+    /// Drop the previous frame's data, keeping allocations.
+    fn begin(&mut self) {
+        self.vertices.clear();
+        self.indices.clear();
+    }
+
+    /// Append one mesh batch. Returns `(base_vertex, base_index, index_count)`
+    /// so the caller can record a draw command for this sub-range.
+    ///
+    /// `base_vertex` is an offset added to every index before indexing the
+    /// vertex buffer, so each batch's indices stay local `0..N`.
+    fn push(
+        &mut self,
+        mesh_verts: &[FillVertex],
+        mesh_indices: &[u32],
+    ) -> (i32, u32, u32) {
+        let base_vertex = self.vertices.len() as i32;
+        let base_index = self.indices.len() as u32;
+        self.vertices.extend(mesh_verts.iter().map(GpuFillVertex::from));
+        self.indices.extend_from_slice(mesh_indices);
+        (base_vertex, base_index, mesh_indices.len() as u32)
+    }
+
+    /// Upload both buffers in a single write each, growing if needed.
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.vertices.is_empty() {
+            return;
+        }
+
+        let vlen = self.vertices.len() as u32;
+        if vlen > self.vertex_capacity {
+            self.vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh vertices"),
+                contents: bytemuck::cast_slice(&self.vertices),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+            self.vertex_capacity = vlen;
+        } else {
+            queue.write_buffer(
+                &self.vertex_buf,
+                0,
+                bytemuck::cast_slice(&self.vertices),
+            );
+        }
+
+        let ilen = self.indices.len() as u32;
+        if ilen > self.index_capacity {
+            self.index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh indices"),
+                contents: bytemuck::cast_slice(&self.indices),
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            });
+            self.index_capacity = ilen;
+        } else {
+            queue.write_buffer(
+                &self.index_buf,
+                0,
+                bytemuck::cast_slice(&self.indices),
+            );
+        }
+    }
+
+    /// Draw one previously-pushed mesh sub-range.
+    fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        camera_bind_group: &wgpu::BindGroup,
+        base_vertex: i32,
+        base_index: u32,
+        index_count: u32,
+    ) {
+        if index_count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, camera_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
+        pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(
+            base_index..base_index + index_count,
+            base_vertex,
+            0..1,
+        );
+    }
+}
+
 /// One entry in the frame's draw order: which batch, and which instance range.
 #[derive(Clone, Copy)]
 enum DrawCmd {
     Quads(u32, u32),
     Lines(u32, u32),
+    /// Indexed mesh: base_vertex offset, index buffer start, index count.
+    Mesh(i32, u32, u32),
 }
 
 /// A concrete wgpu renderer that draws a [`Frame`] under a [`Camera2d`].
@@ -278,6 +480,7 @@ pub struct Renderer {
     camera_bind_group: wgpu::BindGroup,
     quads: InstancedBatch<GpuQuad>,
     lines: InstancedBatch<GpuLine>,
+    meshes: IndexedBatch,
     /// Per-frame draw order, reused across frames.
     draw_order: Vec<DrawCmd>,
 }
@@ -325,6 +528,7 @@ impl Renderer {
 
         let quads = InstancedBatch::new(&device, config.format, &camera_bgl);
         let lines = InstancedBatch::new(&device, config.format, &camera_bgl);
+        let meshes = IndexedBatch::new(&device, config.format, &camera_bgl);
 
         Self {
             device,
@@ -335,6 +539,7 @@ impl Renderer {
             camera_bind_group,
             quads,
             lines,
+            meshes,
             draw_order: Vec::new(),
         }
     }
@@ -363,6 +568,7 @@ impl Renderer {
         // layer order is render (painter's) order even across primitive kinds.
         self.quads.begin();
         self.lines.begin();
+        self.meshes.begin();
         self.draw_order.clear();
         for primitive in &frame.primitives {
             match primitive {
@@ -374,10 +580,17 @@ impl Renderer {
                     let (offset, count) = self.lines.push(lines.iter().map(GpuLine::from));
                     self.draw_order.push(DrawCmd::Lines(offset, count));
                 }
+                Primitive::Mesh { vertices, indices } => {
+                    let (base_vertex, base_index, index_count) =
+                        self.meshes.push(vertices, indices);
+                    self.draw_order
+                        .push(DrawCmd::Mesh(base_vertex, base_index, index_count));
+                }
             }
         }
         self.quads.upload(&self.device, &self.queue);
         self.lines.upload(&self.device, &self.queue);
+        self.meshes.upload(&self.device, &self.queue);
 
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -431,6 +644,15 @@ impl Renderer {
                     DrawCmd::Lines(offset, count) => {
                         self.lines
                             .draw(&mut pass, &self.camera_bind_group, offset, count);
+                    }
+                    DrawCmd::Mesh(base_vertex, base_index, index_count) => {
+                        self.meshes.draw(
+                            &mut pass,
+                            &self.camera_bind_group,
+                            base_vertex,
+                            base_index,
+                            index_count,
+                        );
                     }
                 }
             }

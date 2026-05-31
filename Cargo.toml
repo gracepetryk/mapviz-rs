@@ -27,6 +27,7 @@ glam = "0.33"
 thiserror = "2"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = "29"
+earcutr = "0.4"
 
 # Web / wasm
 wasm-bindgen = "0.2"
