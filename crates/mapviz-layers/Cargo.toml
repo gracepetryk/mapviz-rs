@@ -12,5 +12,4 @@ workspace = true
 
 [dependencies]
 mapviz-core.workspace = true
-# TODO: earcutr, lyon — polygon triangulation and 2D path tessellation
-# (added when the built-in vector layers are implemented).
+earcutr.workspace = true

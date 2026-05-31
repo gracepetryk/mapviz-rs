@@ -5,7 +5,7 @@
 //! rendering backend directly. Users add their own layers by implementing the
 //! same trait.
 
-use mapviz_core::{Frame, Layer, LineInstance, Primitive, QuadInstance};
+use mapviz_core::{Frame, FillVertex, Layer, LineInstance, Primitive, QuadInstance};
 
 /// A layer of solid-colored quads.
 ///
@@ -98,6 +98,72 @@ impl Layer for LineLayer {
     }
 }
 
+/// A filled-polygon layer backed by pre-tessellated triangle mesh data.
+///
+/// Polygon geometry is tessellated once at construction time (via
+/// [`mapviz_core::tessellate`]) and the resulting `(vertices, indices)` are
+/// cached. Each `prepare` call emits a single [`Primitive::Mesh`] batch.
+///
+/// Coordinate convention follows **MVT 2.1**: exterior rings are wound
+/// counter-clockwise; interior rings (holes) are wound clockwise.
+pub struct PolygonLayer {
+    vertices: Vec<FillVertex>,
+    indices: Vec<u32>,
+}
+
+impl PolygonLayer {
+    /// Build a polygon layer from pre-tessellated vertex/index data.
+    ///
+    /// This is the low-level constructor. Prefer [`PolygonLayer::from_ring`] or
+    /// [`PolygonLayer::with_holes`] for typical use.
+    pub fn from_mesh(vertices: Vec<FillVertex>, indices: Vec<u32>) -> Self {
+        Self { vertices, indices }
+    }
+
+    /// Build a filled polygon from a single exterior ring (no holes).
+    ///
+    /// Returns an error if tessellation fails (e.g. fewer than 3 points).
+    pub fn from_ring(
+        exterior: &[[f32; 2]],
+        color: [f32; 4],
+    ) -> mapviz_core::Result<Self> {
+        let (vertices, indices) = mapviz_core::tessellate(exterior, &[], color)?;
+        Ok(Self::from_mesh(vertices, indices))
+    }
+
+    /// Build a filled polygon with an exterior ring and one or more hole rings.
+    ///
+    /// Hole rings should be wound clockwise (MVT 2.1 convention).
+    /// Returns an error if tessellation fails.
+    pub fn with_holes(
+        exterior: &[[f32; 2]],
+        holes: &[Vec<[f32; 2]>],
+        color: [f32; 4],
+    ) -> mapviz_core::Result<Self> {
+        let (vertices, indices) = mapviz_core::tessellate(exterior, holes, color)?;
+        Ok(Self::from_mesh(vertices, indices))
+    }
+
+    /// The tessellated vertices this layer will emit.
+    pub fn vertices(&self) -> &[FillVertex] {
+        &self.vertices
+    }
+
+    /// The triangle indices this layer will emit.
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+}
+
+impl Layer for PolygonLayer {
+    fn prepare(&mut self, frame: &mut Frame) {
+        frame.push(Primitive::Mesh {
+            vertices: self.vertices.clone(),
+            indices: self.indices.clone(),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +210,45 @@ mod tests {
             Primitive::Lines(lines) => assert_eq!(lines.len(), 4),
             other => panic!("expected a line batch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn polygon_layer_from_ring_produces_valid_mesh() {
+        // A unit square exterior.
+        let ring = [[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let layer = PolygonLayer::from_ring(&ring, [1.0, 0.0, 0.0, 1.0])
+            .expect("tessellation should succeed");
+        assert_eq!(layer.vertices().len(), 4, "4 unique vertices");
+        assert_eq!(layer.indices().len(), 6, "2 triangles = 6 indices");
+        for &i in layer.indices() {
+            assert!((i as usize) < layer.vertices().len());
+        }
+    }
+
+    #[test]
+    fn polygon_layer_prepare_pushes_one_mesh_batch() {
+        let ring = [[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let mut layer = PolygonLayer::from_ring(&ring, [0.5, 0.5, 0.5, 1.0])
+            .expect("tessellation should succeed");
+        let mut frame = mapviz_core::Frame::new();
+        layer.prepare(&mut frame);
+        assert_eq!(frame.primitives.len(), 1);
+        match &frame.primitives[0] {
+            Primitive::Mesh { vertices, indices } => {
+                assert_eq!(vertices.len(), 4);
+                assert_eq!(indices.len(), 6);
+            }
+            other => panic!("expected a mesh batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn polygon_layer_with_hole_has_expected_vertex_count() {
+        let exterior = vec![[0.0f32, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        let hole = vec![[0.5f32, 0.5], [0.5, 1.5], [1.5, 1.5], [1.5, 0.5]];
+        let layer = PolygonLayer::with_holes(&exterior, &[hole], [0.0, 1.0, 0.0, 1.0])
+            .expect("tessellation should succeed");
+        assert_eq!(layer.vertices().len(), 8, "4 outer + 4 inner vertices");
+        assert_eq!(layer.indices().len(), 24, "8 triangles = 24 indices");
     }
 }

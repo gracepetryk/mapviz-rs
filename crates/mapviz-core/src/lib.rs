@@ -16,13 +16,15 @@ pub mod frame;
 pub mod layer;
 pub mod primitive;
 pub mod scene;
+pub mod tessellate;
 
 pub use camera::Camera2d;
 pub use error::{Error, Result};
 pub use frame::Frame;
 pub use layer::Layer;
-pub use primitive::{LineInstance, Primitive, QuadInstance};
+pub use primitive::{FillVertex, LineInstance, Primitive, QuadInstance};
 pub use scene::Scene;
+pub use tessellate::tessellate;
 
 // Planned modules, added as each area is implemented (see CLAUDE.md):
 //   pub mod projection;  // Web Mercator, equirectangular, 3D globe; pluggable trait

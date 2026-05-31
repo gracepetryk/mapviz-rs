@@ -65,15 +65,49 @@ impl LineInstance {
     }
 }
 
+/// A single vertex in a filled-polygon triangle mesh.
+///
+/// `position` is in world units; `color` is linear RGBA in `[0, 1]`. This is
+/// plain `repr(C)` data — no GPU types. The render crate has a matching
+/// `GpuFillVertex` with `bytemuck` derives.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FillVertex {
+    /// Position of the vertex, in world units.
+    pub position: [f32; 2],
+    /// Linear RGBA color, each channel in `[0, 1]`.
+    pub color: [f32; 4],
+}
+
+impl FillVertex {
+    /// Construct a vertex at `position` with the given `color`.
+    pub fn new(position: [f32; 2], color: [f32; 4]) -> Self {
+        Self { position, color }
+    }
+}
+
 /// A batch of like primitive instances, drawable as a single instanced pass.
 ///
 /// Each variant carries a contiguous run of instances. Backends match on the
 /// variant and draw the batch; the order of batches within a [`Frame`] is the
 /// order layers submitted them, which is the render (painter's) order.
+///
+/// The `Mesh` variant uses an indexed draw rather than instancing — it is a
+/// single triangle-list mesh — but it participates in the same painter's order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Primitive {
     /// A batch of solid-colored quads.
     Quads(Vec<QuadInstance>),
     /// A batch of solid-colored line segments.
     Lines(Vec<LineInstance>),
+    /// A filled triangle mesh (indexed draw, triangle-list topology).
+    ///
+    /// `vertices` are the unique vertex positions/colors; `indices` are `u32`
+    /// indices into `vertices`, grouped in triples (one triangle each).
+    Mesh {
+        /// Vertex data for the mesh.
+        vertices: Vec<FillVertex>,
+        /// Triangle indices into `vertices`, three per triangle.
+        indices: Vec<u32>,
+    },
 }

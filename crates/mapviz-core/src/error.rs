@@ -16,4 +16,7 @@ pub enum Error {
     /// (e.g. a latitude beyond ±90°).
     #[error("value out of range: {0}")]
     OutOfRange(String),
+    /// Polygon tessellation failed (degenerate geometry or too few points).
+    #[error("tessellation error: {0}")]
+    Tessellation(String),
 }
