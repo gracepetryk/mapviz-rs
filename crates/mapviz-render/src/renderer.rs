@@ -1,7 +1,7 @@
 //! Concrete wgpu renderer for the 2D primitive set.
 
 use bytemuck::{Pod, Zeroable};
-use mapviz_core::{Camera2d, Frame, LineInstance, Primitive, QuadInstance};
+use mapviz_core::{Camera2d, CircleInstance, Frame, LineInstance, Primitive, QuadInstance};
 use wgpu::util::DeviceExt;
 
 /// Errors raised while setting up or driving the renderer.
@@ -69,6 +69,25 @@ impl From<&LineInstance> for GpuLine {
     }
 }
 
+/// GPU layout for a circle instance. Mirrors [`CircleInstance`].
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuCircle {
+    center: [f32; 2],
+    radius: f32,
+    color: [f32; 4],
+}
+
+impl From<&CircleInstance> for GpuCircle {
+    fn from(c: &CircleInstance) -> Self {
+        Self {
+            center: c.center,
+            radius: c.radius,
+            color: c.color,
+        }
+    }
+}
+
 /// How one GPU instance type is rendered: its shader, topology, vertex layout,
 /// and vertices-per-instance. Implementing this is all a new *instanced*
 /// primitive needs to get a pipeline (via [`build_pipeline`]) and buffering +
@@ -120,6 +139,26 @@ impl GpuInstance for GpuLine {
             wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x4];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuLine>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &ATTRS,
+        }
+    }
+}
+
+impl GpuInstance for GpuCircle {
+    const LABEL: &'static str = "circle";
+    const SHADER: &'static str = include_str!("circle.wgsl");
+    const TOPOLOGY: wgpu::PrimitiveTopology = wgpu::PrimitiveTopology::TriangleStrip;
+    const VERTICES: u32 = 4;
+
+    fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+        // GpuCircle: center (2xf32), radius (1xf32), _pad (1xf32 implicit from
+        // repr(C) alignment), color (4xf32). We use three attributes: Float32x2
+        // for center, Float32 for radius, Float32x4 for color.
+        const ATTRS: [wgpu::VertexAttribute; 3] =
+            wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32, 2 => Float32x4];
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GpuCircle>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &ATTRS,
         }
@@ -266,6 +305,7 @@ impl<T: GpuInstance> InstancedBatch<T> {
 enum DrawCmd {
     Quads(u32, u32),
     Lines(u32, u32),
+    Circles(u32, u32),
 }
 
 /// A concrete wgpu renderer that draws a [`Frame`] under a [`Camera2d`].
@@ -278,6 +318,7 @@ pub struct Renderer {
     camera_bind_group: wgpu::BindGroup,
     quads: InstancedBatch<GpuQuad>,
     lines: InstancedBatch<GpuLine>,
+    circles: InstancedBatch<GpuCircle>,
     /// Per-frame draw order, reused across frames.
     draw_order: Vec<DrawCmd>,
 }
@@ -325,6 +366,7 @@ impl Renderer {
 
         let quads = InstancedBatch::new(&device, config.format, &camera_bgl);
         let lines = InstancedBatch::new(&device, config.format, &camera_bgl);
+        let circles = InstancedBatch::new(&device, config.format, &camera_bgl);
 
         Self {
             device,
@@ -335,6 +377,7 @@ impl Renderer {
             camera_bind_group,
             quads,
             lines,
+            circles,
             draw_order: Vec::new(),
         }
     }
@@ -363,6 +406,7 @@ impl Renderer {
         // layer order is render (painter's) order even across primitive kinds.
         self.quads.begin();
         self.lines.begin();
+        self.circles.begin();
         self.draw_order.clear();
         for primitive in &frame.primitives {
             match primitive {
@@ -374,10 +418,16 @@ impl Renderer {
                     let (offset, count) = self.lines.push(lines.iter().map(GpuLine::from));
                     self.draw_order.push(DrawCmd::Lines(offset, count));
                 }
+                Primitive::Circles(circles) => {
+                    let (offset, count) =
+                        self.circles.push(circles.iter().map(GpuCircle::from));
+                    self.draw_order.push(DrawCmd::Circles(offset, count));
+                }
             }
         }
         self.quads.upload(&self.device, &self.queue);
         self.lines.upload(&self.device, &self.queue);
+        self.circles.upload(&self.device, &self.queue);
 
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -430,6 +480,10 @@ impl Renderer {
                     }
                     DrawCmd::Lines(offset, count) => {
                         self.lines
+                            .draw(&mut pass, &self.camera_bind_group, offset, count);
+                    }
+                    DrawCmd::Circles(offset, count) => {
+                        self.circles
                             .draw(&mut pass, &self.camera_bind_group, offset, count);
                     }
                 }

@@ -65,6 +65,34 @@ impl LineInstance {
     }
 }
 
+/// A solid-colored filled circle (disc) in world space.
+///
+/// `center` is the disc center in world units; `radius` is the disc radius,
+/// also in world units (scales with zoom like a [`QuadInstance`]); `color` is
+/// linear RGBA in `[0, 1]`. This is the natural primitive for MVT POINT
+/// geometry — one `CircleInstance` per point feature.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CircleInstance {
+    /// Center of the disc, in world units.
+    pub center: [f32; 2],
+    /// Radius of the disc, in world units.
+    pub radius: f32,
+    /// Linear RGBA color, each channel in `[0, 1]`.
+    pub color: [f32; 4],
+}
+
+impl CircleInstance {
+    /// A disc centered at `center` with the given `radius` and `color`.
+    pub fn new(center: [f32; 2], radius: f32, color: [f32; 4]) -> Self {
+        Self {
+            center,
+            radius,
+            color,
+        }
+    }
+}
+
 /// A batch of like primitive instances, drawable as a single instanced pass.
 ///
 /// Each variant carries a contiguous run of instances. Backends match on the
@@ -76,4 +104,6 @@ pub enum Primitive {
     Quads(Vec<QuadInstance>),
     /// A batch of solid-colored line segments.
     Lines(Vec<LineInstance>),
+    /// A batch of solid-colored filled circles (discs).
+    Circles(Vec<CircleInstance>),
 }

@@ -5,7 +5,7 @@
 //! rendering backend directly. Users add their own layers by implementing the
 //! same trait.
 
-use mapviz_core::{Frame, Layer, LineInstance, Primitive, QuadInstance};
+use mapviz_core::{CircleInstance, Frame, Layer, LineInstance, Primitive, QuadInstance};
 
 /// A layer of solid-colored quads.
 ///
@@ -98,6 +98,45 @@ impl Layer for LineLayer {
     }
 }
 
+/// A layer of solid-colored filled circles (point markers).
+///
+/// Each circle maps to one MVT POINT feature: a disc centered at the feature's
+/// world-space position. Like [`QuadLayer`] and [`LineLayer`], the instances are
+/// fixed at construction and copied into the frame each time the layer is
+/// prepared.
+pub struct CircleLayer {
+    circles: Vec<CircleInstance>,
+}
+
+impl CircleLayer {
+    /// A layer from an explicit set of circle instances.
+    pub fn new(circles: Vec<CircleInstance>) -> Self {
+        Self { circles }
+    }
+
+    /// A layer that places a disc of the given `radius` and `color` at each
+    /// of the supplied `centers`. This is the common case for MVT POINT
+    /// geometry where all features share the same style.
+    pub fn points(centers: &[[f32; 2]], radius: f32, color: [f32; 4]) -> Self {
+        let circles = centers
+            .iter()
+            .map(|&center| CircleInstance::new(center, radius, color))
+            .collect();
+        Self::new(circles)
+    }
+
+    /// The circle instances this layer will emit.
+    pub fn circles(&self) -> &[CircleInstance] {
+        &self.circles
+    }
+}
+
+impl Layer for CircleLayer {
+    fn prepare(&mut self, frame: &mut Frame) {
+        frame.push(Primitive::Circles(self.circles.clone()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +183,34 @@ mod tests {
             Primitive::Lines(lines) => assert_eq!(lines.len(), 4),
             other => panic!("expected a line batch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn circle_layer_points_builds_correct_count() {
+        let centers = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        let layer = CircleLayer::points(&centers, 0.5, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(layer.circles().len(), 3);
+    }
+
+    #[test]
+    fn circle_layer_prepare_pushes_one_circles_batch() {
+        let centers = [[0.0, 0.0], [2.0, 0.0]];
+        let mut layer = CircleLayer::points(&centers, 1.0, [0.0, 1.0, 0.0, 1.0]);
+        let mut frame = Frame::new();
+        layer.prepare(&mut frame);
+        assert_eq!(frame.primitives.len(), 1);
+        match &frame.primitives[0] {
+            Primitive::Circles(circles) => assert_eq!(circles.len(), 2),
+            other => panic!("expected a circles batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn circle_instance_new_roundtrips_fields() {
+        use mapviz_core::CircleInstance;
+        let c = CircleInstance::new([3.0, 4.0], 2.5, [1.0, 0.5, 0.0, 0.8]);
+        assert_eq!(c.center, [3.0, 4.0]);
+        assert!((c.radius - 2.5).abs() < 1e-6);
+        assert_eq!(c.color, [1.0, 0.5, 0.0, 0.8]);
     }
 }

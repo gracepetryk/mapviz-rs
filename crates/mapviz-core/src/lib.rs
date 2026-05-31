@@ -21,7 +21,7 @@ pub use camera::Camera2d;
 pub use error::{Error, Result};
 pub use frame::Frame;
 pub use layer::Layer;
-pub use primitive::{LineInstance, Primitive, QuadInstance};
+pub use primitive::{CircleInstance, LineInstance, Primitive, QuadInstance};
 pub use scene::Scene;
 
 // Planned modules, added as each area is implemented (see CLAUDE.md):
