@@ -13,6 +13,7 @@ pub mod camera;
 pub mod coords;
 pub mod error;
 pub mod frame;
+pub mod geometry;
 pub mod layer;
 pub mod primitive;
 pub mod scene;
@@ -21,10 +22,15 @@ pub mod tessellate;
 pub use camera::Camera2d;
 pub use error::{Error, Result};
 pub use frame::Frame;
+pub use geometry::{Shape, Style};
 pub use layer::Layer;
-pub use primitive::{FillVertex, LineInstance, Primitive, QuadInstance};
+pub use primitive::{FillVertex, LineInstance, QuadInstance};
 pub use scene::Scene;
-pub use tessellate::tessellate;
+pub use tessellate::{DrawData, tessellate, tessellate_shape};
+
+/// Re-export of the [`geo`] crate so downstream crates can build geometry
+/// without depending on `geo` directly.
+pub use geo;
 
 // Planned modules, added as each area is implemented (see CLAUDE.md):
 //   pub mod projection;  // Web Mercator, equirectangular, 3D globe; pluggable trait

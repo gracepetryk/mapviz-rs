@@ -1,15 +1,18 @@
-//! Backend-agnostic drawable primitives.
+//! Low-level draw instances — the output of tessellating styled geometry.
 //!
-//! Primitives are plain data: a layer produces them, a backend consumes them.
+//! These are *not* authored directly. A scene is described with
+//! [`Shape`](crate::Shape)s (`geo` geometry + [`Style`](crate::Style)); the
+//! [`tessellate`](crate::tessellate) module turns each shape into these flat,
+//! GPU-friendly instances, which a backend uploads and draws:
+//!
+//! - [`QuadInstance`] — a point marker.
+//! - [`LineInstance`] — one segment of a stroked line / polygon outline.
+//! - [`FillVertex`] — a vertex of a triangulated polygon fill.
+//!
 //! They carry no GPU types — the `repr(C)` layout is a convenience for backends
 //! that upload them directly, not a coupling to any backend.
-//!
-//! A [`Primitive`] is a *batch* of like instances rather than a single shape, so
-//! a backend can render each variant as one instanced draw call while preserving
-//! the order in which layers submitted them. New primitive kinds are new
-//! variants, not new fields scattered across the frame.
 
-/// An axis-aligned, solid-colored quad in world space.
+/// An axis-aligned, solid-colored quad in world space (a point marker).
 ///
 /// `center` and `half_extent` are in world units; `color` is linear RGBA in
 /// `[0, 1]`.
@@ -84,30 +87,4 @@ impl FillVertex {
     pub fn new(position: [f32; 2], color: [f32; 4]) -> Self {
         Self { position, color }
     }
-}
-
-/// A batch of like primitive instances, drawable as a single instanced pass.
-///
-/// Each variant carries a contiguous run of instances. Backends match on the
-/// variant and draw the batch; the order of batches within a [`Frame`] is the
-/// order layers submitted them, which is the render (painter's) order.
-///
-/// The `Mesh` variant uses an indexed draw rather than instancing — it is a
-/// single triangle-list mesh — but it participates in the same painter's order.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Primitive {
-    /// A batch of solid-colored quads.
-    Quads(Vec<QuadInstance>),
-    /// A batch of solid-colored line segments.
-    Lines(Vec<LineInstance>),
-    /// A filled triangle mesh (indexed draw, triangle-list topology).
-    ///
-    /// `vertices` are the unique vertex positions/colors; `indices` are `u32`
-    /// indices into `vertices`, grouped in triples (one triangle each).
-    Mesh {
-        /// Vertex data for the mesh.
-        vertices: Vec<FillVertex>,
-        /// Triangle indices into `vertices`, three per triangle.
-        indices: Vec<u32>,
-    },
 }

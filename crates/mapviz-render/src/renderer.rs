@@ -1,7 +1,7 @@
 //! Concrete wgpu renderer for the 2D primitive set.
 
 use bytemuck::{Pod, Zeroable};
-use mapviz_core::{Camera2d, FillVertex, Frame, LineInstance, Primitive, QuadInstance};
+use mapviz_core::{Camera2d, FillVertex, Frame, LineInstance, QuadInstance, tessellate_shape};
 use wgpu::util::DeviceExt;
 
 /// Errors raised while setting up or driving the renderer.
@@ -570,22 +570,24 @@ impl Renderer {
         self.lines.begin();
         self.meshes.begin();
         self.draw_order.clear();
-        for primitive in &frame.primitives {
-            match primitive {
-                Primitive::Quads(quads) => {
-                    let (offset, count) = self.quads.push(quads.iter().map(GpuQuad::from));
-                    self.draw_order.push(DrawCmd::Quads(offset, count));
-                }
-                Primitive::Lines(lines) => {
-                    let (offset, count) = self.lines.push(lines.iter().map(GpuLine::from));
-                    self.draw_order.push(DrawCmd::Lines(offset, count));
-                }
-                Primitive::Mesh { vertices, indices } => {
-                    let (base_vertex, base_index, index_count) =
-                        self.meshes.push(vertices, indices);
-                    self.draw_order
-                        .push(DrawCmd::Mesh(base_vertex, base_index, index_count));
-                }
+        // Tessellate each shape into draw instances, bucketed by draw model.
+        // Within a shape we record fill (under), then stroke, then markers (on
+        // top); across shapes, submission order is render (painter's) order.
+        for shape in &frame.shapes {
+            let data = tessellate_shape(shape);
+            if !data.fill_indices.is_empty() {
+                let (base_vertex, base_index, index_count) =
+                    self.meshes.push(&data.fill_vertices, &data.fill_indices);
+                self.draw_order
+                    .push(DrawCmd::Mesh(base_vertex, base_index, index_count));
+            }
+            if !data.strokes.is_empty() {
+                let (offset, count) = self.lines.push(data.strokes.iter().map(GpuLine::from));
+                self.draw_order.push(DrawCmd::Lines(offset, count));
+            }
+            if !data.markers.is_empty() {
+                let (offset, count) = self.quads.push(data.markers.iter().map(GpuQuad::from));
+                self.draw_order.push(DrawCmd::Quads(offset, count));
             }
         }
         self.quads.upload(&self.device, &self.queue);

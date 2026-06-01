@@ -14,3 +14,4 @@ workspace = true
 glam.workspace = true
 thiserror.workspace = true
 earcutr.workspace = true
+geo = "0.33.1"

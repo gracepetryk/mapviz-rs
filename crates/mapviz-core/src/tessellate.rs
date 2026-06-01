@@ -1,25 +1,153 @@
-//! GPU-free polygon tessellation.
+//! GPU-free tessellation of styled `geo` geometry into draw instances.
 //!
-//! Converts a polygon (one exterior ring plus zero or more hole rings) into a
-//! flat vertex/index list suitable for [`Primitive::Mesh`] indexed triangle-list
-//! rendering.
+//! [`tessellate_shape`] turns a [`Shape`](crate::Shape) into a [`DrawData`]
+//! bundle of flat instances ([`QuadInstance`] markers, [`LineInstance`]
+//! strokes, and a triangulated [`FillVertex`] mesh) that a backend uploads and
+//! draws. All the geometry math lives here, with no GPU types, so it is unit
+//! testable on its own.
 //!
-//! Ring convention follows **MVT 2.1**: exterior rings are wound
-//! counter-clockwise; interior rings (holes) are wound clockwise. `earcutr`
-//! does not require any particular winding — it accepts the raw coordinates and
-//! hole-start indices — so this module simply feeds those through.
+//! Polygon fills are triangulated with `earcutr`. Ring winding follows the
+//! usual convention (exterior counter-clockwise, holes clockwise), but
+//! `earcutr` does not require it — it works from the raw coordinates and
+//! hole-start indices.
 
-use crate::primitive::FillVertex;
 use crate::error::{Error, Result};
+use crate::geometry::{Shape, Style};
+use crate::primitive::{FillVertex, LineInstance, QuadInstance};
+use geo::{Geometry, LineString, Point, Polygon};
 
-/// Tessellate a polygon into a `(vertices, indices)` triangle mesh.
+/// The flat draw instances produced from one or more [`Shape`]s.
 ///
-/// `exterior` is the outer ring; each element is a `[x, y]` world-space
-/// coordinate. `holes` is a slice of interior rings, each wound opposite to the
-/// exterior. `color` is applied uniformly to every vertex.
+/// Each field maps to a distinct draw model: `markers` are instanced quads,
+/// `strokes` are instanced line segments, and `fill_vertices`/`fill_indices`
+/// form one indexed triangle mesh.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DrawData {
+    /// Point markers (instanced quads).
+    pub markers: Vec<QuadInstance>,
+    /// Line / outline segments (instanced).
+    pub strokes: Vec<LineInstance>,
+    /// Triangle-mesh vertices for polygon fills.
+    pub fill_vertices: Vec<FillVertex>,
+    /// Triangle indices into `fill_vertices` (three per triangle).
+    pub fill_indices: Vec<u32>,
+}
+
+/// Tessellate one styled geometry into [`DrawData`].
+pub fn tessellate_shape(shape: &Shape) -> DrawData {
+    let mut out = DrawData::default();
+    add_geometry(&shape.geometry, &shape.style, &mut out);
+    out
+}
+
+fn add_geometry(geom: &Geometry<f32>, style: &Style, out: &mut DrawData) {
+    match geom {
+        Geometry::Point(p) => add_point(p, style, out),
+        Geometry::MultiPoint(mp) => {
+            for p in &mp.0 {
+                add_point(p, style, out);
+            }
+        }
+        Geometry::Line(l) => {
+            if let Some(color) = style.stroke {
+                let coords = [[l.start.x, l.start.y], [l.end.x, l.end.y]];
+                stroke_coords(&coords, style.stroke_width, color, out);
+            }
+        }
+        Geometry::LineString(ls) => add_linestring(ls, style, out),
+        Geometry::MultiLineString(mls) => {
+            for ls in &mls.0 {
+                add_linestring(ls, style, out);
+            }
+        }
+        Geometry::Polygon(poly) => add_polygon(poly, style, out),
+        Geometry::MultiPolygon(mp) => {
+            for poly in &mp.0 {
+                add_polygon(poly, style, out);
+            }
+        }
+        Geometry::Rect(r) => add_polygon(&r.to_polygon(), style, out),
+        Geometry::Triangle(t) => add_polygon(&t.to_polygon(), style, out),
+        Geometry::GeometryCollection(gc) => {
+            for g in &gc.0 {
+                add_geometry(g, style, out);
+            }
+        }
+    }
+}
+
+fn add_point(p: &Point<f32>, style: &Style, out: &mut DrawData) {
+    if let Some(color) = style.fill {
+        out.markers
+            .push(QuadInstance::square([p.x(), p.y()], style.point_size, color));
+    }
+}
+
+fn add_linestring(ls: &LineString<f32>, style: &Style, out: &mut DrawData) {
+    if let Some(color) = style.stroke {
+        let coords = coords_of(ls);
+        stroke_coords(&coords, style.stroke_width, color, out);
+    }
+}
+
+fn add_polygon(poly: &Polygon<f32>, style: &Style, out: &mut DrawData) {
+    if let Some(color) = style.fill {
+        fill_polygon(poly, color, out);
+    }
+    if let Some(color) = style.stroke {
+        // Polygon rings are closed, so the raw coordinates already include the
+        // segment back to the start.
+        stroke_coords(&coords_of(poly.exterior()), style.stroke_width, color, out);
+        for ring in poly.interiors() {
+            stroke_coords(&coords_of(ring), style.stroke_width, color, out);
+        }
+    }
+}
+
+fn fill_polygon(poly: &Polygon<f32>, color: [f32; 4], out: &mut DrawData) {
+    let exterior = open_ring(poly.exterior());
+    let holes: Vec<Vec<[f32; 2]>> = poly.interiors().iter().map(open_ring).collect();
+    if let Ok((vertices, indices)) = tessellate(&exterior, &holes, color) {
+        let base = out.fill_vertices.len() as u32;
+        out.fill_vertices.extend(vertices);
+        out.fill_indices.extend(indices.into_iter().map(|i| i + base));
+    }
+}
+
+/// All ring coordinates as `[x, y]` pairs (closed, as `geo` stores them).
+fn coords_of(ls: &LineString<f32>) -> Vec<[f32; 2]> {
+    ls.coords().map(|c| [c.x, c.y]).collect()
+}
+
+/// Ring coordinates with the duplicate closing point dropped, for triangulation.
+fn open_ring(ls: &LineString<f32>) -> Vec<[f32; 2]> {
+    let mut v = coords_of(ls);
+    if v.len() >= 2 && v.first() == v.last() {
+        v.pop();
+    }
+    v
+}
+
+/// Emit a [`LineInstance`] for each consecutive pair of distinct points.
+fn stroke_coords(coords: &[[f32; 2]], width: f32, color: [f32; 4], out: &mut DrawData) {
+    let mut prev: Option<[f32; 2]> = None;
+    for &p in coords {
+        if let Some(a) = prev {
+            if a != p {
+                out.strokes.push(LineInstance::new(a, p, width, color));
+            }
+        }
+        prev = Some(p);
+    }
+}
+
+/// Tessellate a polygon (one exterior ring + zero or more holes) into a
+/// `(vertices, indices)` triangle mesh.
 ///
-/// Returns an error if `exterior` has fewer than three points, or if `earcutr`
-/// fails to produce a valid triangulation (degenerate geometry).
+/// `exterior` and each hole are `[x, y]` world-space rings *without* a repeated
+/// closing point. `color` is applied to every vertex. Returns an error if the
+/// exterior has fewer than three points or `earcutr` produces a malformed
+/// triangulation.
 pub fn tessellate(
     exterior: &[[f32; 2]],
     holes: &[Vec<[f32; 2]>],
@@ -49,9 +177,8 @@ pub fn tessellate(
         }
     }
 
-    let raw_indices = earcutr::earcut(&flat_coords, &hole_starts, 2).map_err(|e| {
-        Error::Tessellation(format!("earcutr failed: {e:?}"))
-    })?;
+    let raw_indices = earcutr::earcut(&flat_coords, &hole_starts, 2)
+        .map_err(|e| Error::Tessellation(format!("earcutr failed: {e:?}")))?;
 
     // Build FillVertex for every coordinate in flat_coords.
     let total_verts = flat_coords.len() / 2;
@@ -85,6 +212,8 @@ pub fn tessellate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::Shape;
+    use geo::{Coord, LineString, MultiPoint, Point, Polygon};
 
     /// A unit square: 4 corners → 2 triangles → 6 indices.
     #[test]
@@ -93,39 +222,87 @@ mod tests {
         let (verts, indices) = tessellate(&ring, &[], [1.0, 0.0, 0.0, 1.0]).unwrap();
         assert_eq!(verts.len(), 4, "four unique vertices");
         assert_eq!(indices.len(), 6, "two triangles = 6 indices");
-        // All indices are in range.
         for &i in &indices {
             assert!((i as usize) < verts.len());
         }
-        // All vertices got the right color.
         for v in &verts {
             assert_eq!(v.color, [1.0, 0.0, 0.0, 1.0]);
         }
     }
 
-    /// A square with a square hole: 4 outer + 4 inner vertices.
-    /// earcutr should produce 8 triangles (24 indices) for the annular region.
+    /// A square with a square hole: 4 outer + 4 inner vertices, 8 triangles.
     #[test]
     fn square_with_hole_has_expected_triangle_count() {
-        // Exterior: counter-clockwise 2×2 square.
         let exterior = vec![[0.0f32, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
-        // Hole: clockwise 1×1 square centered at (1,1).
         let hole = vec![[0.5f32, 0.5], [0.5, 1.5], [1.5, 1.5], [1.5, 0.5]];
-        let (verts, indices) =
-            tessellate(&exterior, &[hole], [0.0, 1.0, 0.0, 1.0]).unwrap();
+        let (verts, indices) = tessellate(&exterior, &[hole], [0.0, 1.0, 0.0, 1.0]).unwrap();
         assert_eq!(verts.len(), 8, "4 outer + 4 inner vertices");
-        // Triangulating an annular quadrilateral yields 8 triangles.
         assert_eq!(indices.len(), 24, "8 triangles = 24 indices");
-        // All indices in range.
         for &i in &indices {
             assert!((i as usize) < verts.len(), "index {i} out of range");
         }
     }
 
-    /// Too few points should return an error.
     #[test]
     fn too_few_points_returns_error() {
         let result = tessellate(&[[0.0, 0.0], [1.0, 0.0]], &[], [1.0; 4]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn point_fill_makes_a_marker() {
+        let shape = Shape::new(Point::new(3.0f32, 4.0), Style::marker([1.0, 0.0, 0.0, 1.0], 0.5));
+        let data = tessellate_shape(&shape);
+        assert_eq!(data.markers.len(), 1);
+        assert_eq!(data.markers[0].center, [3.0, 4.0]);
+        assert_eq!(data.markers[0].half_extent, [0.5, 0.5]);
+        assert!(data.strokes.is_empty() && data.fill_vertices.is_empty());
+    }
+
+    #[test]
+    fn multipoint_makes_one_marker_each() {
+        let mp = MultiPoint::new(vec![Point::new(0.0f32, 0.0), Point::new(1.0, 1.0)]);
+        let data = tessellate_shape(&Shape::new(mp, Style::marker([1.0; 4], 1.0)));
+        assert_eq!(data.markers.len(), 2);
+    }
+
+    #[test]
+    fn linestring_stroke_makes_n_minus_1_segments() {
+        let ls = LineString::from(vec![(0.0f32, 0.0), (1.0, 0.0), (1.0, 1.0)]);
+        let data = tessellate_shape(&Shape::new(ls, Style::stroke([1.0; 4], 0.1)));
+        assert_eq!(data.strokes.len(), 2);
+    }
+
+    #[test]
+    fn polygon_fill_and_stroke() {
+        let ext = LineString::from(vec![
+            (0.0f32, 0.0),
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+            (0.0, 0.0),
+        ]);
+        let poly = Polygon::new(ext, vec![]);
+        let style = Style::fill([0.0, 0.0, 1.0, 1.0]).with_stroke([1.0; 4], 0.1);
+        let data = tessellate_shape(&Shape::new(poly, style));
+        assert_eq!(data.fill_vertices.len(), 4, "closing point dropped for fill");
+        assert_eq!(data.fill_indices.len(), 6);
+        // Closed ring (5 coords) → 4 outline segments.
+        assert_eq!(data.strokes.len(), 4);
+    }
+
+    #[test]
+    fn fill_only_polygon_has_no_strokes() {
+        let poly = Polygon::new(
+            LineString::from(vec![
+                Coord { x: 0.0f32, y: 0.0 },
+                Coord { x: 1.0, y: 0.0 },
+                Coord { x: 0.0, y: 1.0 },
+            ]),
+            vec![],
+        );
+        let data = tessellate_shape(&Shape::new(poly, Style::fill([1.0; 4])));
+        assert!(data.strokes.is_empty());
+        assert_eq!(data.fill_indices.len(), 3);
     }
 }

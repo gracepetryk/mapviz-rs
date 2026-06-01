@@ -1,18 +1,18 @@
 //! The per-frame draw list.
 //!
 //! A `Frame` is the backend-agnostic hand-off between layers and the renderer:
-//! layers push primitive batches into it during `prepare`, and a backend
-//! consumes them in order to produce a rendered image. Because batches keep
-//! their submission order, layer order *is* render order across primitive
-//! kinds — a line batch pushed after a quad batch draws on top of it.
+//! layers push [`Shape`]s into it during `prepare`, and a backend tessellates
+//! and draws them in order to produce an image. Because shapes keep their
+//! submission order, layer order *is* render order — a shape pushed later draws
+//! on top of one pushed earlier.
 
-use crate::primitive::Primitive;
+use crate::geometry::Shape;
 
-/// An ordered list of primitive batches to draw this frame.
+/// An ordered list of styled geometries to draw this frame.
 #[derive(Clone, Debug, Default)]
 pub struct Frame {
-    /// Primitive batches, in the order layers emitted them (render order).
-    pub primitives: Vec<Primitive>,
+    /// Shapes, in the order layers emitted them (render / painter's order).
+    pub shapes: Vec<Shape>,
 }
 
 impl Frame {
@@ -21,13 +21,13 @@ impl Frame {
         Self::default()
     }
 
-    /// Append a primitive batch to the draw list.
-    pub fn push(&mut self, primitive: Primitive) {
-        self.primitives.push(primitive);
+    /// Append a shape to the draw list.
+    pub fn push(&mut self, shape: Shape) {
+        self.shapes.push(shape);
     }
 
-    /// Drop all primitives, keeping allocated capacity for reuse.
+    /// Drop all shapes, keeping allocated capacity for reuse.
     pub fn clear(&mut self) {
-        self.primitives.clear();
+        self.shapes.clear();
     }
 }
