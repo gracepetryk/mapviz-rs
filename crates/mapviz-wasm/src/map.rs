@@ -1,8 +1,8 @@
 //! The `Map` class exposed to JavaScript.
 
 use glam::Vec2;
-use mapviz_core::geo::{LineString, MultiLineString, Point, Polygon};
-use mapviz_core::{Camera2d, Scene, Shape, Style};
+use mapviz_core::geo::{Coord, Rect};
+use mapviz_core::{Camera2d, Scene, Shape};
 use mapviz_layers::ShapeLayer;
 use mapviz_render::Renderer;
 use wasm_bindgen::prelude::*;
@@ -12,7 +12,8 @@ use web_sys::HtmlCanvasElement;
 ///
 /// Construct it with [`Map::create`] (async), then drive it from JS: call
 /// [`Map::render`] each animation frame and feed input through [`Map::pan`] /
-/// [`Map::zoom_at`] / [`Map::resize`].
+/// [`Map::zoom_at`] / [`Map::resize`]. Populate the scene with content such as
+/// [`Map::show_tile`].
 #[wasm_bindgen]
 pub struct Map {
     renderer: Renderer,
@@ -25,7 +26,8 @@ impl Map {
     /// Create a map that renders into `canvas`. The canvas's `width`/`height`
     /// attributes must already be set to the desired physical pixel size.
     ///
-    /// Async because GPU adapter/device acquisition is async.
+    /// The scene starts empty; add content with methods like
+    /// [`Map::show_tile`]. Async because GPU adapter/device acquisition is async.
     pub async fn create(canvas: HtmlCanvasElement) -> Result<Map, JsError> {
         console_error_panic_hook::set_once();
 
@@ -36,94 +38,62 @@ impl Map {
             .await
             .map_err(|e| JsError::new(&e.to_string()))?;
 
-        // A placeholder scene until real data sources land, expressed entirely
-        // in `geo` geometry: a gradient grid of point markers, a filled polygon
-        // with a hole, the axes, and a border (later layers draw on top, which
-        // also exercises cross-shape draw order).
-        let cols: u32 = 20;
-        let rows: u32 = 20;
-        let spacing = 2.0;
-        let square = 1.5;
-        let grid_extent = (cols.max(rows) - 1) as f32 * spacing + square;
-        let border = grid_extent * 0.5 + spacing;
-        let line_w = spacing * 0.15;
-
-        let mut scene = Scene::new();
-
-        // Grid of gradient point markers (one shape per cell).
-        let half = square * 0.5;
-        let origin_x = -((cols - 1) as f32) * spacing * 0.5;
-        let origin_y = -((rows - 1) as f32) * spacing * 0.5;
-        let denom_x = (cols - 1).max(1) as f32;
-        let denom_y = (rows - 1).max(1) as f32;
-        let mut grid = ShapeLayer::default();
-        for row in 0..rows {
-            for col in 0..cols {
-                let cx = origin_x + col as f32 * spacing;
-                let cy = origin_y + row as f32 * spacing;
-                let color = [col as f32 / denom_x, row as f32 / denom_y, 0.5, 1.0];
-                grid.push(Shape::new(Point::new(cx, cy), Style::marker(color, half)));
-            }
-        }
-        scene.add_layer(Box::new(grid));
-
-        // A filled magenta polygon with a square hole, to exercise the fill path.
-        let fc = border * 0.45;
-        let s = border * 0.18;
-        let h = s * 0.45;
-        let exterior = LineString::from(vec![
-            (fc - s, fc - s),
-            (fc + s, fc - s),
-            (fc + s, fc + s),
-            (fc - s, fc + s),
-            (fc - s, fc - s),
-        ]);
-        let hole = LineString::from(vec![
-            (fc - h, fc - h),
-            (fc - h, fc + h),
-            (fc + h, fc + h),
-            (fc + h, fc - h),
-            (fc - h, fc - h),
-        ]);
-        let poly = Polygon::new(exterior, vec![hole]);
-        scene.add_layer(Box::new(ShapeLayer::new(vec![Shape::new(
-            poly,
-            Style::fill([1.0, 0.2, 0.8, 0.85]).with_stroke([1.0, 1.0, 1.0, 0.9], line_w * 0.6),
-        )])));
-
-        // Axes through the origin (one shape, two segments).
-        let axes = MultiLineString::new(vec![
-            LineString::from(vec![(-border, 0.0), (border, 0.0)]),
-            LineString::from(vec![(0.0, -border), (0.0, border)]),
-        ]);
-        scene.add_layer(Box::new(ShapeLayer::new(vec![Shape::new(
-            axes,
-            Style::stroke([1.0, 1.0, 1.0, 0.85], line_w),
-        )])));
-
-        // Border around the grid (a polygon outline, drawn on top).
-        let border_ring = LineString::from(vec![
-            (-border, -border),
-            (border, -border),
-            (border, border),
-            (-border, border),
-            (-border, -border),
-        ]);
-        scene.add_layer(Box::new(ShapeLayer::new(vec![Shape::new(
-            Polygon::new(border_ring, vec![]),
-            Style::stroke([0.25, 0.8, 1.0, 0.9], line_w),
-        )])));
-
-        let mut camera = Camera2d::new(Vec2::new(width as f32, height as f32));
-        // Fit the bordered grid comfortably within the smaller viewport dimension.
-        let view_extent = border * 2.0;
-        camera.set_scale(width.min(height) as f32 / (view_extent * 1.1));
+        let scene = Scene::new();
+        let camera = Camera2d::new(Vec2::new(width as f32, height as f32));
 
         Ok(Map {
             renderer,
             scene,
             camera,
         })
+    }
+
+    /// Replace the scene with a single rectangle textured by a PNG image.
+    ///
+    /// `png` is the raw bytes of a PNG file (e.g. a fetched map tile); decoding
+    /// to pixels happens here in wasm, so callers never convert formats
+    /// themselves. The rectangle is centered at the world origin, two world
+    /// units tall, with its width matching the image's aspect ratio, and the
+    /// camera is fit to show it.
+    pub fn show_tile(&mut self, png: &[u8]) -> Result<(), JsError> {
+        let texture = mapviz_tiles::decode_png(png)
+            .map_err(|e| JsError::new(&e.to_string()))?
+            .into_handle();
+        let width = texture.width;
+        let height = texture.height;
+
+        // World rectangle: 2 units tall, width scaled by the image aspect ratio.
+        let aspect = if height == 0 {
+            1.0
+        } else {
+            width as f32 / height as f32
+        };
+        let half_h = 1.0;
+        let half_w = half_h * aspect;
+        let rect = Rect::new(
+            Coord {
+                x: -half_w,
+                y: -half_h,
+            },
+            Coord {
+                x: half_w,
+                y: half_h,
+            },
+        );
+
+        let mut layer = ShapeLayer::default();
+        layer.push(Shape::textured(rect, texture));
+
+        let mut scene = Scene::new();
+        scene.add_layer(Box::new(layer));
+        self.scene = scene;
+
+        // Fit the rectangle within the viewport with a little margin.
+        let viewport = self.camera.viewport();
+        let scale = (viewport.min_element() / (half_h.max(half_w) * 2.0 * 1.1)).max(f32::MIN_POSITIVE);
+        self.camera.set_center(Vec2::ZERO);
+        self.camera.set_scale(scale);
+        Ok(())
     }
 
     /// Render one frame.

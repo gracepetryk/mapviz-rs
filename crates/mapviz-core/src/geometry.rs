@@ -8,6 +8,8 @@
 
 pub use geo::Geometry;
 
+use crate::texture::TextureHandle;
+
 /// Linear RGBA, each channel in `[0, 1]`.
 pub type Rgba = [f32; 4];
 
@@ -96,12 +98,19 @@ impl Style {
 /// [`Frame`](crate::Frame), and the renderer tessellates each one. Group many
 /// like primitives into a single `Multi*` geometry (e.g. [`geo::MultiPoint`])
 /// to have them drawn in one batched pass.
+///
+/// An optional [`texture`](Shape::texture) paints the geometry's bounding
+/// rectangle with an image (e.g. a map tile) instead of, or in addition to, the
+/// `Style`. When set, the texture draws on top of any fill and beneath any
+/// stroke.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shape {
     /// The geometry, in `f32` world coordinates.
     pub geometry: Geometry<f32>,
     /// How to paint it.
     pub style: Style,
+    /// An optional image painted over the geometry's bounding rectangle.
+    pub texture: Option<TextureHandle>,
 }
 
 impl Shape {
@@ -110,6 +119,26 @@ impl Shape {
         Self {
             geometry: geometry.into(),
             style,
+            texture: None,
         }
+    }
+
+    /// Paint `geometry`'s bounding rectangle with `texture`. The geometry is
+    /// typically a rectangle (e.g. a tile's world bounds); the image's UV `0..1`
+    /// range maps across that bounding box. Uses a default (paint-nothing)
+    /// `Style`, so only the texture shows; chain [`Shape::with_style`] to add a
+    /// fill or stroke.
+    pub fn textured(geometry: impl Into<Geometry<f32>>, texture: TextureHandle) -> Self {
+        Self {
+            geometry: geometry.into(),
+            style: Style::default(),
+            texture: Some(texture),
+        }
+    }
+
+    /// Replace this shape's style.
+    pub fn with_style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
     }
 }

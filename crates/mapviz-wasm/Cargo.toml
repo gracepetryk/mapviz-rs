@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 mapviz-core.workspace = true
 mapviz-render.workspace = true
-mapviz-tiles.workspace = true
+mapviz-tiles = { workspace = true, features = ["png"] }
 mapviz-layers.workspace = true
 mapviz-data.workspace = true
 glam.workspace = true

@@ -14,13 +14,30 @@
 use crate::error::{Error, Result};
 use crate::geometry::{Shape, Style};
 use crate::primitive::{FillVertex, LineInstance, QuadInstance};
-use geo::{Geometry, LineString, Point, Polygon};
+use crate::texture::TextureHandle;
+use geo::{BoundingRect, Geometry, LineString, Point, Polygon};
+
+/// An axis-aligned quad in world space painted with a [`TextureHandle`].
+///
+/// `center`/`half_extent` are in world units; the image's UV `0..1` range maps
+/// across the full quad. The `texture` is opaque image data — carrying it here
+/// keeps the geometry→quad math GPU-free, and a backend uploads/caches the
+/// pixels when it draws the quad.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TexturedQuad {
+    /// Center of the quad, in world units.
+    pub center: [f32; 2],
+    /// Half-width and half-height, in world units.
+    pub half_extent: [f32; 2],
+    /// Image to sample across the quad.
+    pub texture: TextureHandle,
+}
 
 /// The flat draw instances produced from one or more [`Shape`]s.
 ///
 /// Each field maps to a distinct draw model: `markers` are instanced quads,
-/// `strokes` are instanced line segments, and `fill_vertices`/`fill_indices`
-/// form one indexed triangle mesh.
+/// `strokes` are instanced line segments, `fill_vertices`/`fill_indices` form
+/// one indexed triangle mesh, and `textured_quads` are image-painted quads.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DrawData {
     /// Point markers (instanced quads).
@@ -31,13 +48,41 @@ pub struct DrawData {
     pub fill_vertices: Vec<FillVertex>,
     /// Triangle indices into `fill_vertices` (three per triangle).
     pub fill_indices: Vec<u32>,
+    /// Image-textured quads (e.g. map tiles).
+    pub textured_quads: Vec<TexturedQuad>,
 }
 
 /// Tessellate one styled geometry into [`DrawData`].
+///
+/// A shape's [`texture`](Shape::texture), if any, becomes a [`TexturedQuad`]
+/// spanning the geometry's bounding rectangle. The fill (under) and stroke (on
+/// top) from the [`Style`] are still emitted, so a texture can be layered
+/// between them.
 pub fn tessellate_shape(shape: &Shape) -> DrawData {
     let mut out = DrawData::default();
     add_geometry(&shape.geometry, &shape.style, &mut out);
+    if let Some(texture) = &shape.texture {
+        add_texture(&shape.geometry, texture, &mut out);
+    }
     out
+}
+
+/// Emit a [`TexturedQuad`] covering `geom`'s axis-aligned bounding rectangle.
+/// A degenerate (zero-area or empty) bounding box produces nothing.
+fn add_texture(geom: &Geometry<f32>, texture: &TextureHandle, out: &mut DrawData) {
+    let Some(rect) = geom.bounding_rect() else {
+        return;
+    };
+    let c = rect.center();
+    let half_extent = [rect.width() * 0.5, rect.height() * 0.5];
+    if half_extent[0] <= 0.0 || half_extent[1] <= 0.0 {
+        return;
+    }
+    out.textured_quads.push(TexturedQuad {
+        center: [c.x, c.y],
+        half_extent,
+        texture: texture.clone(),
+    });
 }
 
 fn add_geometry(geom: &Geometry<f32>, style: &Style, out: &mut DrawData) {
@@ -289,6 +334,24 @@ mod tests {
         assert_eq!(data.fill_indices.len(), 6);
         // Closed ring (5 coords) → 4 outline segments.
         assert_eq!(data.strokes.len(), 4);
+    }
+
+    #[test]
+    fn texture_emits_one_quad_over_bounding_rect() {
+        use crate::texture::TextureImage;
+        let tex = TextureImage::new(1, 1, vec![255, 0, 0, 255])
+            .unwrap()
+            .into_handle();
+        // A 4-wide, 2-tall rect from (0,0) to (4,2).
+        let rect = geo::Rect::new(Coord { x: 0.0f32, y: 0.0 }, Coord { x: 4.0, y: 2.0 });
+        let data = tessellate_shape(&Shape::textured(rect, tex));
+        assert_eq!(data.textured_quads.len(), 1);
+        let q = &data.textured_quads[0];
+        assert_eq!(q.center, [2.0, 1.0]);
+        assert_eq!(q.half_extent, [2.0, 1.0]);
+        // Default style paints nothing else.
+        assert!(data.markers.is_empty() && data.strokes.is_empty());
+        assert!(data.fill_vertices.is_empty());
     }
 
     #[test]

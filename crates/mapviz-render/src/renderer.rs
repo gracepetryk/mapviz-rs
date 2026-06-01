@@ -1,7 +1,12 @@
 //! Concrete wgpu renderer for the 2D primitive set.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use bytemuck::{Pod, Zeroable};
-use mapviz_core::{Camera2d, FillVertex, Frame, LineInstance, QuadInstance, tessellate_shape};
+use mapviz_core::{
+    Camera2d, FillVertex, Frame, LineInstance, QuadInstance, TexturedQuad, tessellate_shape,
+};
 use wgpu::util::DeviceExt;
 
 /// Errors raised while setting up or driving the renderer.
@@ -82,6 +87,25 @@ impl From<&FillVertex> for GpuFillVertex {
         Self {
             position: v.position,
             color: v.color,
+        }
+    }
+}
+
+/// GPU layout for a textured-quad instance. Mirrors the `center`/`half_extent`
+/// of a [`TexturedQuad`]; the texture itself is bound separately, not packed
+/// here. UVs are derived from the vertex index in the shader.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuTexQuad {
+    center: [f32; 2],
+    half_extent: [f32; 2],
+}
+
+impl From<&TexturedQuad> for GpuTexQuad {
+    fn from(q: &TexturedQuad) -> Self {
+        Self {
+            center: q.center,
+            half_extent: q.half_extent,
         }
     }
 }
@@ -461,6 +485,264 @@ impl IndexedBatch {
     }
 }
 
+/// A GPU texture uploaded from a [`TextureHandle`], plus the bind group that
+/// binds it (and the shared sampler) for the textured-quad pipeline. The
+/// `_image` keeps the source handle alive so its pointer — used as the cache
+/// key — stays unique for the texture's lifetime.
+struct CachedTexture {
+    bind_group: wgpu::BindGroup,
+    _image: mapviz_core::TextureHandle,
+}
+
+/// A pipeline plus instance buffer for textured quads, with a cache of uploaded
+/// GPU textures keyed by source-image identity.
+///
+/// Unlike [`InstancedBatch`], textured quads can't all be drawn in one
+/// instanced call: each may sample a different texture, so each is its own draw
+/// with its own texture bind group. Instances still share one buffer; draws
+/// index into it one quad at a time.
+struct TexturedBatch {
+    pipeline: wgpu::RenderPipeline,
+    /// Layout for the per-texture bind group (texture view + sampler).
+    texture_bgl: wgpu::BindGroupLayout,
+    /// Sampler shared by every textured quad.
+    sampler: wgpu::Sampler,
+    buffer: wgpu::Buffer,
+    /// Buffer capacity in instances.
+    capacity: u32,
+    /// Instances accumulated this frame.
+    scratch: Vec<GpuTexQuad>,
+    /// Uploaded textures, keyed by the source handle's pointer. Persists across
+    /// frames so a tile's pixels upload once.
+    cache: HashMap<usize, CachedTexture>,
+}
+
+impl TexturedBatch {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        camera_bgl: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tex"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("tex.wgsl").into()),
+        });
+
+        let texture_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tex bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("tex sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("tex"),
+            bind_group_layouts: &[Some(camera_bgl), Some(&texture_bgl)],
+            immediate_size: 0,
+        });
+
+        const ATTRS: [wgpu::VertexAttribute; 2] =
+            wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tex"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuTexQuad>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &ATTRS,
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tex"),
+            size: std::mem::size_of::<GpuTexQuad>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline,
+            texture_bgl,
+            sampler,
+            buffer,
+            capacity: 0,
+            scratch: Vec::new(),
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Drop the previous frame's instances, keeping the texture cache.
+    fn begin(&mut self) {
+        self.scratch.clear();
+    }
+
+    /// Ensure `quad`'s texture is uploaded, then append its instance. Returns
+    /// `(instance_index, texture_key)` to record a single-quad draw.
+    fn push(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        quad: &TexturedQuad,
+    ) -> (u32, usize) {
+        let key = Arc::as_ptr(&quad.texture) as usize;
+        self.cache
+            .entry(key)
+            .or_insert_with(|| upload_texture(device, queue, &self.texture_bgl, &self.sampler, &quad.texture));
+        let index = self.scratch.len() as u32;
+        self.scratch.push(GpuTexQuad::from(quad));
+        (index, key)
+    }
+
+    /// Upload accumulated instances in one write, growing the buffer if needed.
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let len = self.scratch.len() as u32;
+        if len == 0 {
+            return;
+        }
+        if len > self.capacity {
+            self.buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("tex"),
+                contents: bytemuck::cast_slice(&self.scratch),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+            self.capacity = len;
+        } else {
+            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&self.scratch));
+        }
+    }
+
+    /// Draw one previously-pushed quad with its texture bound.
+    fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        camera_bind_group: &wgpu::BindGroup,
+        instance_index: u32,
+        texture_key: usize,
+    ) {
+        let Some(entry) = self.cache.get(&texture_key) else {
+            return;
+        };
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, camera_bind_group, &[]);
+        pass.set_bind_group(1, &entry.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.buffer.slice(..));
+        pass.draw(0..4, instance_index..instance_index + 1);
+    }
+}
+
+/// Upload a [`TextureHandle`]'s pixels to a new GPU texture and build its bind
+/// group. A free function (not a method) so it can borrow the batch's layout and
+/// sampler while `push` mutably borrows the cache.
+fn upload_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    image: &mapviz_core::TextureHandle,
+) -> CachedTexture {
+    let size = wgpu::Extent3d {
+        width: image.width.max(1),
+        height: image.height.max(1),
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("tile texture"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        // sRGB so sampling decodes to linear; the surface re-encodes on output.
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * image.width),
+            rows_per_image: Some(image.height),
+        },
+        size,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("tile texture bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    });
+    CachedTexture {
+        bind_group,
+        _image: image.clone(),
+    }
+}
+
 /// One entry in the frame's draw order: which batch, and which instance range.
 #[derive(Clone, Copy)]
 enum DrawCmd {
@@ -468,6 +750,8 @@ enum DrawCmd {
     Lines(u32, u32),
     /// Indexed mesh: base_vertex offset, index buffer start, index count.
     Mesh(i32, u32, u32),
+    /// Textured quad: instance index, texture cache key.
+    TexturedQuad(u32, usize),
 }
 
 /// A concrete wgpu renderer that draws a [`Frame`] under a [`Camera2d`].
@@ -481,6 +765,7 @@ pub struct Renderer {
     quads: InstancedBatch<GpuQuad>,
     lines: InstancedBatch<GpuLine>,
     meshes: IndexedBatch,
+    textured: TexturedBatch,
     /// Per-frame draw order, reused across frames.
     draw_order: Vec<DrawCmd>,
 }
@@ -529,6 +814,7 @@ impl Renderer {
         let quads = InstancedBatch::new(&device, config.format, &camera_bgl);
         let lines = InstancedBatch::new(&device, config.format, &camera_bgl);
         let meshes = IndexedBatch::new(&device, config.format, &camera_bgl);
+        let textured = TexturedBatch::new(&device, config.format, &camera_bgl);
 
         Self {
             device,
@@ -540,6 +826,7 @@ impl Renderer {
             quads,
             lines,
             meshes,
+            textured,
             draw_order: Vec::new(),
         }
     }
@@ -569,10 +856,12 @@ impl Renderer {
         self.quads.begin();
         self.lines.begin();
         self.meshes.begin();
+        self.textured.begin();
         self.draw_order.clear();
         // Tessellate each shape into draw instances, bucketed by draw model.
-        // Within a shape we record fill (under), then stroke, then markers (on
-        // top); across shapes, submission order is render (painter's) order.
+        // Within a shape we record fill (under), then texture, then stroke, then
+        // markers (on top); across shapes, submission order is render (painter's)
+        // order.
         for shape in &frame.shapes {
             let data = tessellate_shape(shape);
             if !data.fill_indices.is_empty() {
@@ -580,6 +869,10 @@ impl Renderer {
                     self.meshes.push(&data.fill_vertices, &data.fill_indices);
                 self.draw_order
                     .push(DrawCmd::Mesh(base_vertex, base_index, index_count));
+            }
+            for quad in &data.textured_quads {
+                let (index, key) = self.textured.push(&self.device, &self.queue, quad);
+                self.draw_order.push(DrawCmd::TexturedQuad(index, key));
             }
             if !data.strokes.is_empty() {
                 let (offset, count) = self.lines.push(data.strokes.iter().map(GpuLine::from));
@@ -593,6 +886,7 @@ impl Renderer {
         self.quads.upload(&self.device, &self.queue);
         self.lines.upload(&self.device, &self.queue);
         self.meshes.upload(&self.device, &self.queue);
+        self.textured.upload(&self.device, &self.queue);
 
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
@@ -646,6 +940,10 @@ impl Renderer {
                     DrawCmd::Lines(offset, count) => {
                         self.lines
                             .draw(&mut pass, &self.camera_bind_group, offset, count);
+                    }
+                    DrawCmd::TexturedQuad(index, key) => {
+                        self.textured
+                            .draw(&mut pass, &self.camera_bind_group, index, key);
                     }
                     DrawCmd::Mesh(base_vertex, base_index, index_count) => {
                         self.meshes.draw(

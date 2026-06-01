@@ -28,6 +28,9 @@ thiserror = "2"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu = "29"
 earcutr = "0.4"
+# Raster tile decode. Pure-Rust codecs only (selected per-crate via features, e.g.
+# `png`) so it builds for wasm32 and stays small.
+image = { version = "0.25", default-features = false }
 
 # Web / wasm
 wasm-bindgen = "0.2"

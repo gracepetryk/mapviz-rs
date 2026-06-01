@@ -19,4 +19,10 @@ pub enum Error {
     /// Polygon tessellation failed (degenerate geometry or too few points).
     #[error("tessellation error: {0}")]
     Tessellation(String),
+    /// A texture image's pixel buffer did not match its declared dimensions.
+    #[error("texture error: {0}")]
+    Texture(String),
+    /// Decoding encoded data (e.g. a PNG/JPEG raster tile) failed.
+    #[error("decode error: {0}")]
+    Decode(String),
 }

@@ -18,6 +18,7 @@ pub mod layer;
 pub mod primitive;
 pub mod scene;
 pub mod tessellate;
+pub mod texture;
 
 pub use camera::Camera2d;
 pub use error::{Error, Result};
@@ -26,7 +27,8 @@ pub use geometry::{Shape, Style};
 pub use layer::Layer;
 pub use primitive::{FillVertex, LineInstance, QuadInstance};
 pub use scene::Scene;
-pub use tessellate::{DrawData, tessellate, tessellate_shape};
+pub use tessellate::{DrawData, TexturedQuad, tessellate, tessellate_shape};
+pub use texture::{TextureHandle, TextureImage};
 
 /// Re-export of the [`geo`] crate so downstream crates can build geometry
 /// without depending on `geo` directly.

@@ -19,6 +19,13 @@ function sizeCanvas(): [number, number] {
   return [width, height];
 }
 
+/** Fetch a file as raw bytes. */
+async function fetchBytes(url: string): Promise<Uint8Array> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url}: ${res.status} ${res.statusText}`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
 async function main(): Promise<void> {
   if (!("gpu" in navigator)) {
     showError(
@@ -36,6 +43,15 @@ async function main(): Promise<void> {
     map = await Map.create(canvas);
   } catch (e) {
     showError("Failed to initialize mapviz:\n" + String(e));
+    return;
+  }
+
+  // Load a single map tile (raw PNG bytes; wasm decodes it) and show it as one
+  // textured rectangle.
+  try {
+    map.show_tile(await fetchBytes("https://tile.openstreetmap.org/13/2412/3078.png"));
+  } catch (e) {
+    showError("Failed to load tile:\n" + String(e));
     return;
   }
 

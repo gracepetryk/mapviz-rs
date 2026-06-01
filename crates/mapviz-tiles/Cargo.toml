@@ -10,6 +10,11 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Decode PNG raster tiles (pulls in the `image` crate's pure-Rust png codec).
+png = ["dep:image", "image/png"]
+
 [dependencies]
 mapviz-core.workspace = true
-# TODO: geozero, prost, image — tile decode (added when tile sources are implemented).
+image = { workspace = true, optional = true }
+# TODO: geozero, prost — vector tile decode (added when MVT sources are implemented).
